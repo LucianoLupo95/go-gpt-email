@@ -9,7 +9,6 @@ import (
 )
 
 func main() {
-    // Cargar las credenciales del entorno
     username := os.Getenv("EMAIL_USERNAME")
     password := os.Getenv("EMAIL_PASSWORD")
 

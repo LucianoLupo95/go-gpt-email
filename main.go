@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"mime"
+	"net/http"
+	"net/smtp"
 	"os"
 	"strings"
 	"time"
@@ -135,9 +140,87 @@ func processMessage(msg *imap.Message) {
             bodyText = string(b)
         }
     }
+    response, err := callChatGPT(bodyText)
+    if err != nil {
+        log.Printf("Error llamando a ChatGPT: %v", err)
+        response = "Hubo un error en ChatGPT. Disculpe la demora."
+    }
 
-    fmt.Printf("Cuerpo del mensaje:\n%s\n", bodyText)
+    // Enviar una respuesta automática con la respuesta de ChatGPT
+    err = sendAutoReply(from, response)
+    if err != nil {
+        log.Printf("Error enviando respuesta automática: %v", err)
+    }
+}
 
-    // Aquí puedes procesar el contenido del cuerpo del mensaje,
-    // por ejemplo, enviarlo a una API de GPT y luego responder por correo.
+func sendAutoReply(to string, response string) error {
+    smtpServer := os.Getenv("SMTP_SERVER")
+    smtpPort := os.Getenv("SMTP_PORT")
+    smtpUsername := os.Getenv("SMTP_USERNAME")
+    smtpPassword := os.Getenv("SMTP_PASSWORD")
+
+    auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpServer)
+    from := smtpUsername
+    msg := []byte("To: " + to + "\r\n" +
+        "Subject: Re:gpt-go-email\r\n" +
+        "\r\n" +
+        response + "\r\n")
+
+    addr := fmt.Sprintf("%s:%s", smtpServer, smtpPort)
+    err := smtp.SendMail(addr, auth, from, []string{to}, msg)
+    return err
+}
+
+const (
+    openAIURL = "https://api.openai.com/v1/chat/completions"
+)
+
+func callChatGPT(prompt string) (string, error) {
+    apiKey := os.Getenv("OPENAI_API_KEY")
+
+    requestBody, err := json.Marshal(map[string]interface{}{
+        "model": "gpt-3.5-turbo",
+        "messages": []map[string]string{
+            {"role": "user", "content": prompt},
+        },
+    })
+    if err != nil {
+        return "", fmt.Errorf("error creando el cuerpo de la solicitud: %v", err)
+    }
+
+    req, err := http.NewRequest("POST", openAIURL, bytes.NewBuffer(requestBody))
+    if err != nil {
+        return "", fmt.Errorf("error creando la solicitud: %v", err)
+    }
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Authorization", "Bearer "+apiKey)
+
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        return "", fmt.Errorf("error en la solicitud: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := ioutil.ReadAll(resp.Body)
+        return "", fmt.Errorf("error en la solicitud: %s", body)
+    }
+
+    var response map[string]interface{}
+    if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+        return "", fmt.Errorf("error decodificando la respuesta: %v", err)
+    }
+
+    choices, ok := response["choices"].([]interface{})
+    if !ok || len(choices) == 0 {
+        return "", fmt.Errorf("no se recibieron respuestas de ChatGPT")
+    }
+
+    content, ok := choices[0].(map[string]interface{})["message"].(map[string]interface{})["content"].(string)
+    if !ok {
+        return "", fmt.Errorf("error extrayendo el contenido de la respuesta")
+    }
+
+    return content, nil
 }
